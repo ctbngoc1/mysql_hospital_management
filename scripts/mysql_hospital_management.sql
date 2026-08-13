@@ -196,8 +196,8 @@ WHERE payment_status = 'Pending' AND bill_date < '2023-11-01';
 SELECT COUNT(patient_id) AS total_patients
 FROM patients;
 
--- Total appointments and completed appointments 
-SELECT COUNT(*) AS total_appointments, SUM(status = 'Completed') AS completed_appointments 
+-- Total booked appointments and completed appointments 
+SELECT COUNT(*) AS total_booked_appointments, SUM(status = 'Completed') AS completed_appointments 
 FROM appointments;
 
 -- Total revenue
@@ -206,13 +206,13 @@ FROM billing
 WHERE payment_status = 'Paid';
 
 -- No-show rate 
-SELECT COUNT(*) AS total_appointments, SUM(status = 'No-show') AS no_show_count,
+SELECT COUNT(*) AS total_booked_appointments, SUM(status = 'No-show') AS no_show_count,
     SUM(status = 'No-show') * 1.0 / COUNT(*) AS no_show_rate
 FROM appointments;
 
 -- 2. Distribution analysis 
 -- Appointment status distribution
-SELECT status, COUNT(*) AS total_appointments 
+SELECT status, COUNT(*) AS number_of_appointments 
 FROM appointments
 GROUP BY status;
 -- (The number of no-show appointments is high because all past appointments with a Scheduled status were updated to No-show)
@@ -256,7 +256,7 @@ SELECT month, monthly_revenue,
 FROM paid_amount_calc
 ORDER BY month;   -- Using WHERE b.payment_status = 'Paid' would not have counted unpaid appointments and show unpaid bill dates 
 
--- Average revenue per appointment (= Total revenue / number of unique appointments) and Total appointments by month
+-- Average revenue per completed appointment (= Total revenue / Completed appointments) and Completed appointments by month 
 WITH revenue_data AS (
     SELECT a.appointment_id, DATE_FORMAT(b.bill_date, '%Y-%m') AS month,
         CASE 
@@ -271,16 +271,16 @@ WITH revenue_data AS (
 )
 SELECT 
     month,
-    COUNT(DISTINCT appointment_id) AS total_appointments,
-    SUM(paid_amount) / COUNT(DISTINCT appointment_id) AS revenue_per_appointment
+    COUNT(DISTINCT appointment_id) AS completed_appointments,
+    SUM(paid_amount) / COUNT(DISTINCT appointment_id) AS revenue_per_completed_appointment
 FROM revenue_data
 GROUP BY month
 ORDER BY month;
 
 -- 4. Specialization demand analysis
--- Number of doctors and appointments for each specialization, ranked from most to least popular specialization
+-- Number of doctors and booked appointments for each specialization, ranked from most to least popular specialization
 SELECT d.specialization, 
-	COUNT(DISTINCT a.appointment_id) AS total_appointments, COUNT(DISTINCT d.doctor_id) AS total_doctors,
+	COUNT(DISTINCT a.appointment_id) AS total_booked_appointments, COUNT(DISTINCT d.doctor_id) AS total_doctors,
     RANK() OVER (ORDER BY COUNT(DISTINCT a.appointment_id) DESC) AS demand_rank
 FROM doctors d 
 LEFT JOIN appointments a 
@@ -288,9 +288,9 @@ LEFT JOIN appointments a
 GROUP BY d.specialization;
 
 -- 5. Doctor workload analysis 
--- Number of appointments per doctor, ranked from most to least popular doctor 
+-- Number of booked appointments per doctor, ranked from most to least popular doctor 
 SELECT d.doctor_id, d.first_name, d.last_name, d.specialization,
-    COUNT(DISTINCT a.appointment_id) AS total_appointments,
+    COUNT(DISTINCT a.appointment_id) AS total_booked_appointments,
     RANK() OVER (ORDER BY COUNT(DISTINCT a.appointment_id) DESC) AS workload_rank
 FROM doctors d
 LEFT JOIN appointments a 
@@ -298,24 +298,24 @@ LEFT JOIN appointments a
 GROUP BY d.doctor_id;
 
 -- 6. Patient retention rate 
--- Percentage of patients who come back after their first visit
+-- Percentage of patients who come back after their first visit (= patients with >= 2 completed appointments / patients with >= 1 completed appointments)
 WITH patient_visits AS (
-	SELECT p.patient_id, COUNT(DISTINCT a.appointment_id) AS total_visits   -- Only counts patients that have completed at least 1 appointment
+	SELECT p.patient_id, COUNT(DISTINCT a.appointment_id) AS total_visits   
     FROM patients p
     INNER JOIN appointments a
         ON p.patient_id = a.patient_id
-    WHERE a.status = 'Completed'
+    WHERE a.status = 'Completed'          -- Only counts patients that have completed at least 1 appointment
     GROUP BY p.patient_id
 ),
 joined_data AS (
     SELECT patient_id, total_visits,
         CASE 
-			WHEN total_visits > 1 THEN 1 
+			WHEN total_visits > 1 THEN 1   -- Patients that have completed at least 2 appointments
 			ELSE 0
 		END AS is_returning
     FROM patient_visits
 )
-SELECT COUNT(DISTINCT patient_id) AS total_patients, SUM(is_returning) AS returning_patients,
+SELECT COUNT(DISTINCT patient_id) AS total_patients_with_completed_appointments, SUM(is_returning) AS returning_patients,
     SUM(is_returning) * 1.0 / COUNT(DISTINCT patient_id) AS retention_rate
 FROM joined_data;
 
@@ -431,10 +431,10 @@ WHERE completed_appointments >= 2 AND total_paid > 2000;
 
 -- C/ Views for dashboarding 
 
--- KPI view (For Total Patients, Total Appointments, Total Revenue and No-show rate cards)  
+-- KPI view (For Total Patients, Total Booked Appointments, Total Revenue and No-show rate cards)  
 CREATE VIEW kpi_view AS
 SELECT COUNT(DISTINCT p.patient_id) AS total_patients,   -- When using JOINs, each ID can be included in multiple rows and therefore we need to use DISTINCT to count them  
-    COUNT(DISTINCT a.appointment_id) AS total_appointments,
+    COUNT(DISTINCT a.appointment_id) AS total_booked_appointments,
     SUM(CASE 
 			WHEN b.payment_status = 'Paid' THEN b.amount 
 			ELSE 0 
@@ -452,7 +452,7 @@ SELECT * FROM kpi_view;
 
 -- Appointment status view (For donut chart of Appointment Status Distribution)
 CREATE VIEW appointment_status_view AS
-SELECT status, COUNT(*) AS total_appointments 
+SELECT status, COUNT(*) AS number_of_appointments 
 FROM appointments
 GROUP BY status;
 
@@ -477,11 +477,11 @@ GROUP BY payment_method;
 
 SELECT * FROM payment_method_view;
 
--- Monthly performance view (For a line chart of Monthly Revenue, a line chart of Cumulative Revenue over Time, and a bar chart of Revenue per Appointment by Month)
+-- Monthly performance view (For a line chart of Monthly Revenue, a line chart of Cumulative Revenue over Time, and a bar chart of Revenue per Completed Appointment by Month)
 CREATE VIEW monthly_perf_view AS
 WITH paid_amount_calc AS (
     SELECT DATE_FORMAT(b.bill_date, '%Y-%m') AS month,   -- Use '%Y-%m' instead of '%m-%Y' for correct chronological sorting
-        COUNT(DISTINCT a.appointment_id) AS total_appointments,
+        COUNT(DISTINCT a.appointment_id) AS completed_appointments,
         SUM(CASE 
                 WHEN b.payment_status = 'Paid' THEN b.amount 
                 ELSE 0 
@@ -493,18 +493,18 @@ WITH paid_amount_calc AS (
         ON t.treatment_id = b.treatment_id
     GROUP BY DATE_FORMAT(b.bill_date, '%Y-%m')
 )
-SELECT month, monthly_revenue, total_appointments,
-    monthly_revenue / total_appointments AS revenue_per_appointment,
+SELECT month, monthly_revenue, completed_appointments,
+    monthly_revenue / completed_appointments AS revenue_per_completed_appointment,
     SUM(monthly_revenue) OVER (ORDER BY month) AS cumulative_revenue
 FROM paid_amount_calc
 ORDER BY month;   
 
 SELECT * FROM monthly_perf_view; 
 
--- Specialization demand view (For a bar chart of Total Appointments by Specialization, a stacked bar to compare Total Doctors and Total Appointments)
+-- Specialization demand view (For a bar chart of Total Appointments by Specialization, a stacked bar to compare Total Doctors and Total Booked Appointments)
 CREATE VIEW specialization_demand_view AS
 SELECT d.specialization, 
-	COUNT(DISTINCT a.appointment_id) AS total_appointments, COUNT(DISTINCT d.doctor_id) AS total_doctors,
+	COUNT(DISTINCT a.appointment_id) AS total_booked_appointments, COUNT(DISTINCT d.doctor_id) AS total_doctors,
     RANK() OVER (ORDER BY COUNT(DISTINCT a.appointment_id) DESC) AS demand_rank
 FROM doctors d 
 LEFT JOIN appointments a 
@@ -513,10 +513,10 @@ GROUP BY d.specialization;
 
 SELECT * FROM specialization_demand_view; 
 
--- Doctor workload view (For a bar chart of Top 5 busiest doctors with Specialization as the legend, a leaderboard table of Doctors by Total Appointments)
+-- Doctor workload view (For a bar chart of Top 5 busiest doctors with Specialization as the legend, a leaderboard table of Doctors by Total Booked Appointments)
 CREATE VIEW doctor_workload_view AS
 SELECT d.doctor_id, d.first_name, d.last_name, d.specialization,
-    COUNT(DISTINCT a.appointment_id) AS total_appointments,
+    COUNT(DISTINCT a.appointment_id) AS total_booked_appointments,
     RANK() OVER (ORDER BY COUNT(DISTINCT a.appointment_id) DESC) AS workload_rank
 FROM doctors d
 LEFT JOIN appointments a 
@@ -543,7 +543,7 @@ joined_data AS (
 		END AS is_returning
     FROM patient_visits
 )
-SELECT COUNT(DISTINCT patient_id) AS total_patients, SUM(is_returning) AS returning_patients,
+SELECT COUNT(DISTINCT patient_id) AS total_patients_with_completed_appointments, SUM(is_returning) AS returning_patients,
     SUM(is_returning) * 1.0 / COUNT(DISTINCT patient_id) AS retention_rate
 FROM joined_data;
 
